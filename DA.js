@@ -1,158 +1,214 @@
-//import required libraries
+// import required libraries
 var express = require('express')
   , colors = require('colors')
+  , TimerJob = require('timer-jobs')
+  , net = require('net')
   , http = require('http')
-  , path = require('path')
-  , os = require('os')
   , openmtc = require('openmtc')
   , XIA = openmtc.interfaces.xIa
   , HttpAdapter = openmtc.transport.http.client
-  , gscl = openmtc.config_gscl.scl;
+  , gscl = openmtc.config_gscl.scl
+  , nscl = openmtc.config_nscl.scl;
 
-//configuration of our application
+// configuration of our application
 var config = {
-    host:os.hostname(),
-    port:'55556',               //port to run on
-    appId:'Dorm7_110_DA',         	// appID for this application
-    containerID:'current', 		//the name of our application's data container
-    maxNrOfInstances:10			//max number of contentInstances in our container
-};
+    host:'140.113.65.29',
+    port:'55556',
+    appId:'Dorm7_110_DA',       // appID for this application
+    containerID:'current',      // the name of our application's data container
+    maxNrOfInstances:10	,       // max number of contentInstances in our container
+    deviceIP: '140.113.65.28',  // arduino IP
+    devicePort: '55558'         // arduino port
+};  
 
 // Create an HTTP client for dIa interface
 var httpHandler = new HttpAdapter();
 // create a dIa interface object
 var dIaClient = new XIA(gscl.dia.uri, httpHandler);
-
-
-/* express */
+// create socket
+var client = new net.Socket();
+// set timer jobs
+var timerGetData = new TimerJob({interval: 5000}, function(done) {
+    client.write('req4data');
+    done();
+});
 var app = express();
-// set which port to run on (default: 3000)
-app.set('port', config.port);
-// setup logging
-app.use(express.logger('dev'));
-//automatically parse incoming data as JSON
-app.use(express.bodyParser());
-//tell express where to find our "thermometer" webpage
-//app.use(express.static(path.join(__dirname, 'public')));
-//event handler to be called when new temperature data comes in
-function handleIncomingData(req, res) {
-    //get the submitted data out of the request
-    var incomingData = req.body;
-    console.log('\n\n');
-	console.log("Received data: ".bgBlue, req.body);
-
-    //we still need to convert the data. The format we want to               
-		//store is this:
-    //{ 
-    //  value: 42,
-    //  timestamp: 1366921261
-    //}
-
-    var dataToPush = {
-        value: incomingData.current,
-        timestamp: incomingData.datetime
-    }
-
-    //push our data
-    pushData(dataToPush);
-
-    //report success
-    res.send(200);
-}
-//tell express to call our handler whenever data comes in
-app.post('/data', handleIncomingData);
-//create an HTTPServer object using our application
+app.use(express.logger('dev')); // setup logging
+app.use(express.bodyParser());  //automatically parse incoming data as JSON
 var HTTPServer = http.createServer(app);
+HTTPServer.listen(config.port);  
 
 
-
-function createContainer() {
-  //The container used by our app to store data. 
-  //defines merely an ID and a maxNrOfInstances
-  var containerData = { container:
-    {
-      id: config.containerID,
-      maxNrOfInstances: config.maxNrOfInstances
-    }
-  };
-  
-  console.log('\n\n');
-  console.log('***Creating Container***'.bgBlue);
-
-  dIaClient.requestIndication(
-     'CREATE', null,                                                   //What do we want to do? (Create something)
-     gscl.dia.uri + '/applications/' + config.appId + '/containers',   //Where? (As a child of the containers collection of our app)
-     containerData                                                     //What do we create? (Our data container)
-
-  ).on('STATUS_CREATED', function (data) {        //What to do when it worked?
-    console.log('***Container Created***'.bgBlue);  //Rejoice!
-    
-    //start listening on the defined port for incoming
-    // temperatur data
-    HTTPServer.listen(55556);  
-
-  }).on('ERROR', function(error) {          //What to do when it did not work?
-    console.log("***Failed to create container***".bgBlue);  //Just weep in shame
-  });
+//some helper methods to decode contentInstance data
+function parseB64Json(s) {
+  return JSON.parse(new Buffer(s, 'base64').toString('utf8'));
 }
 
-function main() {
-  //Registration information about our app. 
-  //For the sake of simplicity, we transmit simply an ID
-  var appData = {
-    application: {
-      appId: config.appId,
-    }
-  };
+function getRepresentation(o) {
+  if (o.representation.contentType !== 'application/json') {
+    throw new Error("Unknown content type");
+  }
+  return JSON.parse(new Buffer(o.representation.$t, 'base64').toString('utf8'));
+}
 
-  console.log('***Registering Application***'.bgBlue);
-
-  dIaClient.requestIndication(
-     'CREATE', null,                   //What do we want to do? (Create something)
-     gscl.dia.uri + '/applications',   //Where, at what URI? (As a child of the applications resource)
-     appData                           //What do we create? (The registration information of our application)
-
-  ).on('STATUS_CREATED', function (data) {  //What to do when it worked?
-    console.log('***Application registered***'.bgBlue);  //Rejoice!
-    createContainer();                            //...and continue by creating a container for our data
-  }).on('ERROR', function(error) {          //What to do when it did not work?
-
-    //409 is the HTTP error code for "conflict". This error occurs when an application
-    //with the same ID as ours is already registered. 
-    //For our training scenario, we'll just assume that we are already registered. 
-    //In 'reality' we would of course have to handle this more sophisticated.
-    if (error == 409)     
-      createContainer(); 
-    else
-      console.log("***Failed to register app: ".bgBlue + error.bgBlue + "***".bgBlue);  //Just weep in shame
-  });
+function getNotificationData(req) {
+	return getRepresentation(req.body.notify);
 }
 
 function pushData(data) {
-  console.log('\n\n');
-  console.log('Pushing data: '.bgBlue, data);
+        
+    console.log("Pushing data: ".bgBlue, data);
 
-  var contentInstance = {
-    contentInstance: {
-      content: {
-        $t: new Buffer(JSON.stringify(data)).toString('base64'),  //Base64 representation of our data
-        contentType: 'application/json'
-      }
+    var contentInstance = {
+        contentInstance: {
+            content: {
+                $t: new Buffer(JSON.stringify(data)).toString('base64'),  //Base64 representation of our data
+                contentType: 'application/json'
+            }
+        }
+    };
+
+    dIaClient.requestIndication(
+        'CREATE', null,
+        gscl.dia.uri + '/applications/' + config.appId +
+        '/containers/' + config.containerID + '/contentInstances',
+        contentInstance
+    ).on('STATUS_CREATED', function (data) {
+        console.log('Data pushed'.bgBlue);
+    }).on('ERROR', function(error) {
+        console.log("Failed to push data".bgBlue);
+    });
+}
+
+function handleIncomingData(data) {
+    
+    console.log("Received data: ".bgBlue + data);
+    
+    var pos = data.indexOf(",");
+    
+    var dataToPush = {
+        value: data.substring(0 ,pos-1),
+        timestamp: data.substr(pos+1, 10)
     }
-  };
 
-  dIaClient.requestIndication(
-     'CREATE', null,                                             //What do we want to do? (Create something)
-     gscl.dia.uri + '/applications/' + config.appId +            //Where, at what URI? (As a child of the contentInstances)
-       '/containers/' + config.containerID + '/contentInstances',
-     contentInstance
-  ).on('STATUS_CREATED', function (data) {  //What to do when it worked?
-    console.log('***Data pushed***'.bgBlue);       //Rejoice!
-   
-  }).on('ERROR', function(error) {             //What to do when it did not work?
-    console.log("***Failed to push data***".bgBlue);  //Just weep in shame
-  });
+    pushData(dataToPush);
+}
+
+function handleContentInstances(contentInstances) {
+	console.log("Handling ContentInstances".bgBlue);
+	
+    var trigger = parseB64Json(contentInstances.contentInstanceCollection.contentInstance[0].content.$t).value;
+    
+    if(trigger == "1") {
+        console.log("ON".bgBlue);
+        client.write("ON");
+    }
+    else if(trigger == "0"){
+        console.log("OFF".bgBlue);
+        client.write("OFF");
+    }
+}
+
+function subscrideToContainer() {
+
+	console.log("Subscribing to containers".bgBlue);
+	
+	var notifyPath = '/trigger';
+	var notifyUri = 'http://' + config.host + ':' + config.port + notifyPath;
+
+	app.post(notifyPath, function(req, res) {
+		console.log("Got contentInstances notification".bgBlue);
+		
+		var notificationData = getNotificationData(req);
+		//console.log(notificationData);
+		handleContentInstances(notificationData.contentInstances);
+		
+		res.send(200);
+	});
+    
+	dIaClient.requestIndication('CREATE', null, 
+		nscl.dia.uri + '/applications/Dorm7_110_NA/containers/trigger/contentInstances/subscriptions',
+		{ subscription: { contact: notifyUri } }
+	).on('STATUS_CREATED', function (data) {
+		console.log('Subscribed to contentInstances of '.bgBlue + containerId.bgBlue);
+	}).on("ERROR", function(err){
+		console.log("Error creating subscription for contentInstances: ".bgBlue + err.bgBlue);
+	});
+	
+}
+
+function createContainer() {
+
+    console.log("Creating Container".bgBlue);
+    
+    var containerData = {
+        container:
+        {
+            id: config.containerID,
+            maxNrOfInstances: config.maxNrOfInstances
+        }
+    };
+
+    dIaClient.requestIndication(
+        'CREATE', null,
+        gscl.dia.uri + '/applications/' + config.appId + '/containers',
+        containerData
+    ).on('STATUS_CREATED', function (data) {
+        console.log("Container Created".bgBlue);
+        
+        // socket connect to arduino
+        client.connect(config.devicePort, config.deviceIP, function() {
+            console.log("Socket connected".bgBlue);
+        });
+        client.on('data', function(data) {
+            var str = data.toString();
+            handleIncomingData(str);
+        });
+        
+        // request for current data every 1 second
+        timerGetData.start();
+
+    }).on('ERROR', function(error) {
+        console.log("Failed to create container".bgBlue);
+    });
+}
+
+function main() {
+
+    console.log("Registering Application".bgBlue);
+
+    var appData = {
+        application: {
+            appId: config.appId,
+        }
+    };
+
+    dIaClient.requestIndication(
+        'CREATE', null,
+        gscl.dia.uri + '/applications',
+        appData
+    ).on('STATUS_CREATED', function (data) {
+        console.log("Application registered".bgBlue);
+        createContainer(); 
+        subscrideToContainer(); // subscribe to NA container(on/off trigger)
+    }).on('ERROR', function(error) {
+        //409 is the HTTP error code for "conflict". This error occurs when an application
+        //with the same ID as ours is already registered. 
+        //For our training scenario, we'll just assume that we are already registered. 
+        //In 'reality' we would of course have to handle this more sophisticated.
+        if (error == 409) {
+            createContainer();
+            subscrideToContainer();
+        }
+        else
+            console.log("Failed to register app: ".bgBlue + error.bgBlue);
+    });
 }
 
 main();
+
+
+
+
+
 
