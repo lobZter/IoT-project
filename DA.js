@@ -16,7 +16,7 @@ var config = {
     port:'55556',
     appId:'Dorm7_110_DA',       // appID for this application
     containerID:'current',      // the name of our application's data container
-    maxNrOfInstances:10	,       // max number of contentInstances in our container
+    maxNrOfInstances: '10',       // max number of contentInstances in our container
     deviceIP: '140.113.65.28',  // arduino IP
     devicePort: '55558'         // arduino port
 };  
@@ -35,22 +35,20 @@ var timerGetData = new TimerJob({interval: 5000}, function(done) {
 var app = express();
 app.use(express.logger('dev')); // setup logging
 app.use(express.bodyParser());  //automatically parse incoming data as JSON
-var HTTPServer = http.createServer(app);
-HTTPServer.listen(config.port);  
+var dIaServer = http.createServer(app);
+dIaServer.listen(config.port);  
 
 
 //some helper methods to decode contentInstance data
 function parseB64Json(s) {
   return JSON.parse(new Buffer(s, 'base64').toString('utf8'));
 }
-
 function getRepresentation(o) {
   if (o.representation.contentType !== 'application/json') {
     throw new Error("Unknown content type");
   }
   return JSON.parse(new Buffer(o.representation.$t, 'base64').toString('utf8'));
 }
-
 function getNotificationData(req) {
 	return getRepresentation(req.body.notify);
 }
@@ -95,9 +93,12 @@ function handleIncomingData(data) {
 }
 
 function handleContentInstances(contentInstances) {
-	console.log("Handling ContentInstances".bgBlue);
 	
-    var trigger = parseB64Json(contentInstances.contentInstanceCollection.contentInstance[0].content.$t).value;
+    console.log("Handling ContentInstances".bgBlue);
+	
+    var contentInstanceCollection = contentInstances.contentInstanceCollection.contentInstance;
+    console.log("Number of Instances: " + contentInstanceCollection.length);
+    var trigger = parseB64Json(contentInstanceCollection[0].content.$t).value;
     
     if(trigger == "1") {
         console.log("ON".bgBlue);
@@ -144,8 +145,7 @@ function createContainer() {
     var containerData = {
         container:
         {
-            id: config.containerID,
-            maxNrOfInstances: config.maxNrOfInstances
+            id: config.containerID
         }
     };
 
@@ -178,9 +178,7 @@ function main() {
     console.log("Registering Application".bgBlue);
 
     var appData = {
-        application: {
-            appId: config.appId,
-        }
+        application: { appId: config.appId }
     };
 
     dIaClient.requestIndication(
@@ -189,14 +187,17 @@ function main() {
         appData
     ).on('STATUS_CREATED', function (data) {
         console.log("Application registered".bgBlue);
+        
         createContainer(); 
         subscrideToContainer(); // subscribe to NA container(on/off trigger)
+        
     }).on('ERROR', function(error) {
         //409 is the HTTP error code for "conflict". This error occurs when an application
         //with the same ID as ours is already registered. 
         //For our training scenario, we'll just assume that we are already registered. 
         //In 'reality' we would of course have to handle this more sophisticated.
         if (error == 409) {
+            console.log("Application already registered.".bgYellow);
             createContainer();
             subscrideToContainer();
         }
